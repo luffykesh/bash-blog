@@ -4,14 +4,20 @@ ERR_NOSQLITE=1;
 ERR_TOUCH_DB_FILE=2;
 ERR_CREATE_TABLE=3;
 ERR_PARSE=4;
-PERMISSIONEXIT=254;
-HELPEXIT=255;
+PERMISSIONEXIT=200;
+HELPEXIT=201;
+ERR=255;
 DB_FILE="blog.db";
+POST_EXPORT_FILE=~/Desktop/post.csv;
+CATEGORY_EXPORT_FILE=~/Desktop/category.csv;
+
+
 POST_QUERY="INSERT INTO post(timestamp,title,content,category_id) VALUES((SELECT strftime('%%s','now')),'%s','%s',(SELECT id from category where category.name='%s'));";
 ADD_CATEGORY_QUERY="INSERT INTO category(name) VALUES('%s');";
 CATEGORY_EXISTS_QUERY="SELECT EXISTS(SELECT name FROM category WHERE category.name='%s');";
-SELECT_POSTS_QUERY="SELECT post.id,  strftime('%d/%m/%Y %H:%M:%S',post.timestamp,'unixepoch','localtime') as timestamp,post.title,post.content, category.name as category FROM post LEFT JOIN category ON post.category_id=category.id "
+SELECT_POSTS_QUERY="SELECT post.id as Id,  strftime('%d/%m/%Y %H:%M:%S',post.timestamp,'unixepoch','localtime') as Timestamp,post.title as Title,post.content Content, category.name as Category FROM post LEFT JOIN category ON post.category_id=category.id "
 ORDER_DESC="ORDER BY post.timestamp DESC"
+SELECT_CATEGORY_QUERY="SELECT id as Id, name as Name from category;";
 
 if [[ ! -f $sqlite ]] || [[ ! -x $sqlite ]]; then
 	echo "sqlite not found/not enough permission" >&2 ;
@@ -66,26 +72,29 @@ show_help(){
 }
 
 post(){
+	local cmd title content category search_key export_file;
 	while [[ $# != 0 ]]; do
-	case $1 in
+	case "$1" in
 		list ) shift;list "all" "$@"; exit;
 			;;
-		add ) shift; local opt_cmdadd=1; local title=$1; local content=$2; shift 2;
-				if [[ -z "$title" ]]; then
-					printf "no title\n" >&2;
-					show_help;exit $HELPEXIT;
-				fi
+		add ) shift; cmd=1; title="$1"; shift; content="$1"; shift;
+					if [[ -z "$title" ]]; then
+						printf "no title\n" >&2;
+						show_help;exit $HELPEXIT;
+					fi
 			;;
-		--category ) shift; local category=$1; shift;
+		--category ) shift; category="$1"; shift;
 			;;
-			search ) shift; local search_key=$1; shift; list "search" "$search_key" "$@"; exit;
+		search ) shift; search_key="$1"; shift; list "search" "$search_key" "$@"; exit;
+			;;
+		export ) shift; cmd=2;
 			;;
 		* ) echo "Invalid option: $1"; show_help; exit $HELPEXIT;
 			;;
 	esac
 	done;
 
-	if [[ $opt_cmdadd == 1 ]]; then
+	if [[ $cmd == 1 ]]; then
 		if [[ ! -z "$category" ]]; then
 			printf -v query "$CATEGORY_EXISTS_QUERY" "$category";
 			if [[ $($sqlite $DB_FILE "$query") == 0 ]]; then
@@ -97,28 +106,33 @@ post(){
 		fi
 		printf -v query "$POST_QUERY" "$title" "$content" "$category";
 		if $sqlite $DB_FILE "$query"; then
-			printf "Post Successfull\n";
+			printf "Post successfull\n";
 		else 
 			printf "Post Failed\n" >&2;
 		fi
+	elif [[ $cmd == 2 ]]; then
+		err=$($sqlite $DB_FILE ".headers ON" ".mode csv" ".once $POST_EXPORT_FILE" "$SELECT_POSTS_QUERY $ORDER_DESC" 2>&1);
+		if [[ $? == 0 ]]; then
+			echo "Posts exported to $POST_EXPORT_FILE";
+		else
+			echo "Error exporting." >&2;
+		fi
 	fi
-	exit;
 }
 
 list(){
-	# echo "$@";
 	local list_all=1;
 	local temp query  opt_search  search_key  offset count;
 	local desc_query=$SELECT_POSTS_QUERY$ORDER_DESC;
 	while [[ $# != 0 ]]; do
-	case $1 in
+	case "$1" in
 		all ) list_all=1; shift;
 			;;
-		search ) shift; opt_search=1; search_key=$1; shift;
+		search ) shift; opt_search=1; search_key="$1"; shift;
 			;;
-		--offset ) shift; offset=$1; shift;
+		--offset ) shift; offset="$1"; shift;
 			;;
-		--count ) shift; count=$1; shift;
+		--count ) shift; count="$1"; shift;
 			;;
 		* ) shift; list_all=1;
 			;;
@@ -158,17 +172,85 @@ list(){
 		query=$query$temp;
 	fi
 	# echo "$query";
-	printf "\e[1mNo.%2cDate%17cTitle%17cContent%15cCategory\e[0m\n" ' ' ' ' ' ' ' ';
+	printf "\e[1mID.%2cDate%17cTitle%17cContent%15cCategory\e[0m\n" ' ' ' ' ' ' ' ';
 	$sqlite $DB_FILE ".mode column" ".width 3 19 20 20 20 20" "$query";
 	exit;
 }
 
+category(){
+	local cmd cat_name cat_id post_id query err list;
+	cmd=0;
+	while [[ $# != 0 ]]; do
+		case "$1" in
+			add ) shift; cmd=1; cat_name="$1";shift;
+				;;
+			list ) shift; cmd=2;
+				;;
+			assign ) shift; cmd=3; post_id="$1"; shift; cat_id="$1"; shift;
+				;;
+			export ) shift; cmd=4;
+				;;
+			* ) echo "Invalid option: " "$1"; exit $ERR_PARSE;
+				;;
+		esac
+	done
+
+	if [[ $cmd == 1 ]]; then
+		if [[ -z "$cat_name" ]]; then
+			echo "Invalid category name" >&2;
+			exit ERR_PARSE;
+		fi
+		printf -v query "$ADD_CATEGORY_QUERY" "$cat_name";
+		err=$($sqlite $DB_FILE "$query" 2>&1);
+		if [[ $? == 0 ]]; then
+			echo "Error creating category" >&2;
+			exit $ERR;
+		else
+			echo "Category added successfull";
+		fi
+	elif [[ $cmd == 2 ]]; then
+		list=$($sqlite $DB_FILE ".mode column" ".width 3 20" "$SELECT_CATEGORY_QUERY");
+		if [[ $? != 0 ]]; then
+			echo "Error retriving from database" >&2;
+			exit $ERR;
+		fi
+		printf "\e[1mID%3cName\e[0m\n" ' ';
+		echo "$list";
+	elif [[ $cmd == 3 ]]; then
+		if [[ -z "$post_id" ]] || [[ ! "$post_id" =~ ^[[:digit:]]+$ ]]; then
+			echo "Invalid Post id: $post_id"  >&2;
+			exit $ERR_PARSE;
+		fi
+		if [[ -z "$cat_id" ]] || [[ ! "$cat_id" =~ ^[[:digit:]]+$ ]]; then
+			echo "Invalid Category id: $cat_id" >&2;
+			exit $ERR_PARSE;
+		fi
+		printf -v query "UPDATE post SET category_id=%d where id=%d and EXISTS(SELECT id FROM category WHERE category.id=%d)" "$cat_id" "$post_id" "$cat_id";
+		$sqlite $DB_FILE "$query";
+		if [[ $? == 0 ]]; then
+			echo "ID assigned";
+		else
+			echo "ID assign failed" >&2;
+			exit $ERR;
+		fi
+	elif [[ $cmd == 4 ]]; then
+		err=$($sqlite $DB_FILE ".headers ON" ".mode csv" ".once $CATEGORY_EXPORT_FILE" "$SELECT_CATEGORY_QUERY" 2>&1);
+		if [[ $? == 0 ]]; then
+			echo "Categories exported to $CATEGORY_EXPORT_FILE";
+		else
+			echo "Error exporting." >&2;
+		fi
+	fi
+}
+
 parse_params(){
 	while [[ $# != 0 ]]; do
-		case $1 in
+		case "$1" in
 			-h | --help ) show_help;exit;
 				;;
-			post ) shift; post "$@"; shift; exit;
+			post ) shift; post "$@"; exit;
+				;;
+			category ) shift; category "$@"; exit;
 				;;
 			* ) printf "Invalid argument \e[1m%s\e[0m\n" "$1"; show_help;exit $HELPEXIT;
 				;;
