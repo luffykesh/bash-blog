@@ -1,36 +1,32 @@
 #!/bin/bash
-sqlite=/opt/local/bin/sqlite3;
-ERR_NOSQLITE=1;
-ERR_TOUCH_DB_FILE=2;
-ERR_CREATE_TABLE=3;
-ERR_PARSE=4;
-PERMISSIONEXIT=200;
-HELPEXIT=201;
-ERR=255;
-BOLD_TEXT="\e[1m";
-RESET_TEXT_FMT="\e[0m";
-DB_FILE=$HOME"/blog.db";
-POST_EXPORT_FILE=$HOME"/Desktop/post.csv";
-CATEGORY_EXPORT_FILE=$HOME"/Desktop/category.csv";
-LOG_FILE=$HOME"/.bash_blog_log.csv";
+readonly sqlite=/opt/local/bin/sqlite3;
+readonly ERR_NOSQLITE=1;
+readonly ERR_TOUCH_DB_FILE=2;
+readonly ERR_CREATE_TABLE=3;
+readonly ERR_PARSE=4;
+readonly PERMISSIONEXIT=200;
+readonly HELPEXIT=201;
+readonly ERR=255;
+readonly DB_FILE=$HOME"/blog.db";
+readonly POST_EXPORT_FILE=$HOME"/Desktop/post.csv";
+readonly CATEGORY_EXPORT_FILE=$HOME"/Desktop/category.csv";
+readonly LOG_FILE=$HOME"/.bash_blog_log.csv";
 
-SELECT_POST_QUERY="INSERT INTO post(timestamp,title,content,category_id) VALUES((SELECT strftime('%%s','now')),'%s','%s',(SELECT id from category where category.name='%s'));";
-ADD_CATEGORY_QUERY="INSERT INTO category(name) VALUES('%s');";
-CATEGORY_EXISTS_NAME_QUERY="SELECT EXISTS(SELECT name FROM category WHERE category.name='%s');";
-CATEGORY_EXISTS_ID_QUERY="SELECT EXISTS(SELECT id FROM category WHERE category.id=%d);";
-SELECT_POSTS_QUERY="SELECT post.id as Id,  strftime('%d/%m/%Y %H:%M:%S',post.timestamp,'unixepoch','localtime') as Timestamp,post.title as Title,post.content Content, category.name as Category FROM post LEFT JOIN category ON post.category_id=category.id "
-ORDER_DESC="ORDER BY post.timestamp DESC"
-SELECT_CATEGORY_QUERY="SELECT id as Id, name as Name from category;";
-POST_EXISTS_ID_QUERY="SELECT EXISTS(SELECT id FROM post where id=%d);";
+readonly INSERT_POST_QUERY="INSERT INTO post(timestamp,title,content,category_id) VALUES((SELECT strftime('%%s','now')),'%s','%s',(SELECT id from category where category.name='%s'));";
+readonly SELECT_POSTS_QUERY="SELECT post.id as Id,  strftime('%d/%m/%Y %H:%M:%S',post.timestamp,'unixepoch','localtime') as Timestamp,post.title as Title,post.content Content, category.name as Category FROM post LEFT JOIN category ON post.category_id=category.id "
+readonly ORDER_POST_DESC="ORDER BY post.timestamp DESC"
+readonly POST_EXISTS_ID_QUERY="SELECT EXISTS(SELECT id FROM post where id=%d);";
 
-if [[ ! -f $sqlite ]] || [[ ! -x $sqlite ]]; then
-	echo "sqlite not found/not enough permission" >&2 ;
-	exit $ERR_NOSQLITE;
-fi
+readonly ADD_CATEGORY_QUERY="INSERT INTO category(name) VALUES('%s');";
+readonly CATEGORY_EXISTS_NAME_QUERY="SELECT EXISTS(SELECT name FROM category WHERE category.name='%s');";
+readonly CATEGORY_EXISTS_ID_QUERY="SELECT EXISTS(SELECT id FROM category WHERE category.id=%d);";
+readonly SELECT_CATEGORY_QUERY="SELECT id as Id, name as Name from category;";
+
+
 
 log(){
 	if [[ ! -f "$LOG_FILE" ]]; then
-		if ! touch $LOG_FILE; then
+		if ! touch "$LOG_FILE"; then
 			echo "Error creating log file" >&2;
 			return 255;
 		fi
@@ -48,6 +44,18 @@ log(){
 	done
 	echo "$logtext" >> "$LOG_FILE";
 }
+if [[ ! -f $sqlite ]] || [[ ! -x $sqlite ]]; then
+	echo "sqlite not found/not enough permission" >&2 ;
+	log "sqlite not found or no execute permission";
+	exit $ERR_NOSQLITE;
+else 
+	sqlite_version=$($sqlite $DB_FILE "select sqlite_version()");
+	if [[ $sqlite_version < 3 ]]; then
+		echo "Please upgrade to sqlite version > 3" >&2;
+		log "sqlite version error" "version found: $sqlite_version";
+		exit $ERR_NOSQLITE;
+	fi
+fi
 
 initdb(){
 	local err;
@@ -66,8 +74,9 @@ initdb(){
 			exit $ERR_TOUCH_DB_FILE;
 		fi
 		err=$(
-			$sqlite "$DB_FILE" \
-			"CREATE TABLE IF NOT EXISTS category(\
+			#sqlite version < 3 does not support create if exists
+			$sqlite "$DB_FILE" "\
+			CREATE TABLE IF NOT EXISTS category(\
 			id integer PRIMARY KEY,
 			name TEXT UNIQUE NOT NULL\
 			);\
@@ -78,13 +87,15 @@ initdb(){
 			content TEXT,\
 			category_id INTEGER,
 			FOREIGN KEY(category_id) REFERENCES category(id)\
-			);"  2>&1;
+			);" 2>&1;
 		)
 		if [[ $? != 0 ]]; then
 			echo "ERROR CREATING TABLE" >&2 ;
 			rm "$DB_FILE";
 			log "error creating table" "$err";
 			exit $ERR_CREATE_TABLE;
+		else 
+			log "created database";
 		fi
 
 	else
@@ -98,7 +109,49 @@ initdb(){
 }
 
 show_help(){
-	printf "\e[1mCommand%10cDescription\e[0m\n" " ";
+	printf "
+blog \e[1mpost\e[0m|\e[1mcategory\e[0m|\e[1m--help\e[0m|\e[1m-h\e[0m
+
+  \e[1mpost\e[0m \e[1madd\e[0m|\e[1mlist\e[0m|\e[1medit\e[0m|\e[1mdelete\e[0m|\e[1msearch\e[0m|\e[1mexport\e[0m
+      \e[1madd\e[0m - add a new post
+          add \e[4mtitle\e[0m \e[4mcontent\e[0m [--category \e[4mcategory_name\e[0m]
+              \e[4mtitle\e[0m - title of the post (must not be empty)
+            \e[4mcontent\e[0m - content of the post 
+           \e[4mcategory\e[0m - add a tag of category_name to post
+      \e[1mlist\e[0m - view posts, sorted by latest post first
+          list [--offset \e[4moffset_value\e[0m] [--count \e[4mmax_count\e[0m]
+             offset - exclude first \e[4moffset_value\e[0m number of posts
+              count - display a maximum of \e[4mmax_count\e[0m posts
+      \e[1medit\e[0m - edit a post
+          edit \e[4mpost_id\e[0m \e[1mtitle\e[0m|\e[1mcontent\e[0m|\e[1mcategory\e[0m \e[4mnew_value\e[0m
+            \e[4mpost_id\e[0m - Id of the post to edit
+            If category is to be edited \e[4mnew_value\e[0m should be a valid category id.
+      \e[1mdelete\e[0m - delete a post
+          delete \e[4mpost_id\e[0m
+            \e[4mpost_id\e[0m - id of the post to delete
+      \e[1msearch\e[0m - search a keyword in post's title or content
+          search \e[4msearch_key\e[0m [--offset \e[4moffset_value\e[0m] [--count \e[4mmax_count\e[0m]
+            \e[4msearch_key\e[0m - string to search
+      \e[1mexport\e[0m - export all posts in csv format
+          A 'post.csv' file is saved to Desktop.
+
+  \e[1mcategory\e[0m \e[1madd\e[0m|\e[1mlist\e[0m|\e[1massign\e[0m|\e[1medit\e[0m|\e[1mexport\e[0m
+      \e[1madd\e[0m - add a new category
+          \e[1madd\e[0m \e[4mcategory_name\e[0m
+            \e[4mcategory_name\e[0m - Name of the new category
+      \e[1mlist\e[0m - list all categories
+      \e[1massign\e[0m - assign a category to a post
+          assign \e[4mpost_id\e[0m \e[4mcategory_id\e[0m
+            Assigns new category to post corresponding \e[4mpost_id\e[0m
+      \e[1medit\e[0m - edit a category's name
+          edit \e[4mcategory_id\e[0m \e[4mcategory_name\e[0m 
+            assign \e[4mcategory_name\e[0m to post corresponding to \e[4mcategory_id\e[0m
+      \e[1mexport\e[0m - export all categories in csv format
+          A 'category.csv' file is saved to Desktop.
+
+  \e[1m-h\e[0m,\e[1m--help\e[0m - View this message.
+
+"
 }
 
 post(){
@@ -139,7 +192,7 @@ post(){
 				fi
 			fi
 		fi
-		printf -v query "$SELECT_POST_QUERY" "$title" "$content" "$category";
+		printf -v query "$INSERT_POST_QUERY" "$title" "$content" "$category";
 		err=$($sqlite "$DB_FILE" "$query" 2>&1;) #insert post
 		if [[ $? == 0 ]]; then
 			echo "Post successfull";
@@ -149,7 +202,7 @@ post(){
 			exit $ERR;
 		fi
 	elif [[ $cmd == 2 ]]; then #export posts to file
-		err=$($sqlite "$DB_FILE" ".headers ON" ".mode csv" ".once $POST_EXPORT_FILE" "$SELECT_POSTS_QUERY $ORDER_DESC" 2>&1);
+		err=$($sqlite -header -csv "$DB_FILE" ".once $POST_EXPORT_FILE" "$SELECT_POSTS_QUERY $ORDER_POST_DESC" 2>&1);
 		if [[ $? == 0 ]]; then
 			echo "Posts exported to $POST_EXPORT_FILE";
 		else
@@ -226,8 +279,8 @@ post(){
 
 list(){
 	local list_all=1;
-	local temp query  opt_search  search_key  offset count;
-	local desc_query=$SELECT_POSTS_QUERY$ORDER_DESC;
+	local temp query  opt_search  search_key  offset count category;
+	local desc_query=$SELECT_POSTS_QUERY$ORDER_POST_DESC;
 	while [[ $# != 0 ]]; do
 	case "$1" in
 		all ) list_all=1; shift;
@@ -238,6 +291,8 @@ list(){
 			;;
 		--count ) shift; count="$1"; shift;
 			;;
+		--category ) shift; category="$1"; shift;
+			;;
 		* ) shift; list_all=1;
 			;;
 	esac
@@ -245,7 +300,7 @@ list(){
 
 	if [[ $opt_search == 1 ]]; then
 		if [[ ! -z "$search_key" ]]; then
-			printf -v query "%s WHERE post.title LIKE '%%%s%%' or post.content LIKE '%%%s%%' %s " "$SELECT_POSTS_QUERY" "$search_key" "$search_key" "$ORDER_DESC";
+			printf -v query "%s WHERE post.title LIKE '%%%s%%' or post.content LIKE '%%%s%%' %s " "$SELECT_POSTS_QUERY" "$search_key" "$search_key" "$ORDER_POST_DESC";
 		else
 			query=$desc_query;
 		fi
@@ -255,12 +310,12 @@ list(){
 
 	#validate if count is given, is an integer
 	if [[ ! -z "$count" ]] && [[ ! "$count" =~ ^[[:digit:]]+$ ]]; then
-				echo "Invalid count" $count >&2;
+				echo "Invalid count" "$count" >&2;
 				exit $ERR_PARSE;
 	fi
 	#validate if offset is give, is an integer
 	if [[ ! -z "$offset" ]] && [[ ! "$offset" =~ ^[[:digit:]]+$ ]]; then
-				echo "Invalid offset" $offset >&2;
+				echo "Invalid offset" "$offset" >&2;
 				exit $ERR_PARSE;
 	fi
 
@@ -276,7 +331,7 @@ list(){
 		query=$query$temp;
 	fi
 	printf "\e[1mID.%2cDate%17cTitle%17cContent%15cCategory\e[0m\n" ' ' ' ' ' ' ' ';
-	$sqlite "$DB_FILE" ".mode column" ".width 3 19 20 20 20 20" "$query";
+	$sqlite -column "$DB_FILE" ".width 3 19 20 20 20 20" "$query";
 	exit;
 }
 
@@ -314,7 +369,7 @@ category(){
 			echo "Category added successfull";
 		fi
 	elif [[ $cmd == 2 ]]; then #list category
-		list=$($sqlite "$DB_FILE" ".mode column" ".width 3 20" "$SELECT_CATEGORY_QUERY" 2>&1);
+		list=$($sqlite -column "$DB_FILE" ".width 3 20" "$SELECT_CATEGORY_QUERY" 2>&1);
 		if [[ $? != 0 ]]; then
 			echo "Error retriving from database" >&2;
 			log "Error reading categories" "$list";
@@ -342,7 +397,7 @@ category(){
 			exit $ERR;
 		fi
 	elif [[ $cmd == 4 ]]; then #export categories to file
-		err=$($sqlite "$DB_FILE" ".headers ON" ".mode csv" ".once $CATEGORY_EXPORT_FILE" "$SELECT_CATEGORY_QUERY" 2>&1);
+		err=$($sqlite -header -csv "$DB_FILE" ".once $CATEGORY_EXPORT_FILE" "$SELECT_CATEGORY_QUERY" 2>&1);
 		if [[ $? == 0 ]]; then
 			echo "Categories exported to $CATEGORY_EXPORT_FILE";
 		else
@@ -388,7 +443,8 @@ parse_params(){
 }
 
 if [[ $# == 0 ]]; then
-	echo "Bash-Blog: Blogging with (a) bash!"; #pun intended
+	printf "\e[1mBash-Blog\e[0m: Blogging with (a) bash!"; #pun intended
+	echo;
 	exit;
 fi
 
